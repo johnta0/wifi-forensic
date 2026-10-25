@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Launches WfxHelper.app via LaunchServices (open) and prints its JSON to stdout.
+# Usage: wfx-helper current|scan [--timeout N]
+# Exit codes: 0 success / 2 location not authorized / 3 Wi-Fi error / 64 usage / 1 other (missing output)
+set -uo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP="${WFX_HELPER_APP:-$DIR/build/WfxHelper.app}"
+
+usage() { echo "usage: wfx-helper current|scan [--timeout N]${1:+ ($1)}" >&2; exit 64; }
+
+# Validate arguments before launching. --out is reserved for this wrapper, so reject it from callers.
+case "${1:-}" in
+  current|scan) ;;
+  *) usage ;;
+esac
+args=("$1"); shift
+while (( $# )); do
+  case "$1" in
+    --timeout)
+      [[ "${2:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || usage "--timeout requires a positive number"
+      args+=("$1" "$2"); shift 2 ;;
+    *) usage "unknown argument: $1" ;;
+  esac
+done
+
+if [[ ! -d "$APP" ]]; then
+  printf 'helper app not found: %s (run helper/build.sh)\n' "$APP" >&2
+  echo '{"schema_version":1,"authorization":null,"error":"helper app not found"}'
+  exit 1
+fi
+
+# Write into a dedicated directory and remove the whole directory on exit.
+# If the helper writes late after an interrupt, the write fails because the directory is gone, so no SSIDs etc. are left behind.
+TMP_DIR="$(mktemp -d -t wfx-helper)" || exit 1
+TMP="$TMP_DIR/result.json"
+trap 'rm -rf "$TMP_DIR"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# open does not return the child's exit code, so derive the result from the JSON.
+# -W: wait for exit / -n: new instance
+open -W -n "$APP" --args "${args[@]}" --out "$TMP"
+
+if [[ ! -s "$TMP" ]]; then
+  echo '{"schema_version":1,"authorization":null,"error":"helper produced no output"}'
+  exit 1
+fi
+cat "$TMP"
+
+extract() { /usr/bin/plutil -extract "$1" raw -o - "$TMP" 2>/dev/null || true; }
+AUTH="$(extract authorization)"
+ERR="$(extract error)"
+if [[ "$ERR" == usage:* ]]; then exit 64; fi
+case "$AUTH" in
+  authorized) if [[ -z "$ERR" ]]; then exit 0; else exit 3; fi ;;
+  denied|restricted|timeout|not_determined) exit 2 ;;
+  *) exit 1 ;;
+esac
