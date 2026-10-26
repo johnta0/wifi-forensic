@@ -8,6 +8,8 @@ use crate::bundle::*;
 use crate::collect;
 use crate::model::HelperReport;
 use std::fmt::Write;
+use std::fs::OpenOptions;
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -88,10 +90,14 @@ pub struct CaptureArgs {
 /// Starts tcpdump in the background and stops it with SIGINT on whichever comes first: the max seconds elapsing,
 /// `tcpdump.stop` appearing, or tcpdump exiting on its own. It always stops by the max seconds even if the foreground
 /// or worker dies, and the user never needs to kill a root process (stopping is signaled via a file).
+///
+/// The supervisor never opens a path in the bundle itself: the pid goes to stdout and tcpdump's log to stderr,
+/// both files opened by the user beforehand. A root `>` into the user-owned bundle would follow a planted symlink
+/// and truncate any file on the system. `dhcp.pcap` is safe because tcpdump opens it after `-Z` drops root.
 const TCPDUMP_SUPERVISOR: &str = r#"
-tcpdump -i "$2" -n -U -w "$1/dhcp.pcap" -Z "$4" "$5" 2>"$1/tcpdump.log" &
+tcpdump -i "$2" -n -U -w "$1/dhcp.pcap" -Z "$4" "$5" &
 p=$!
-echo $p > "$1/tcpdump.pid"
+echo $p
 i=0
 while [ $i -lt "$3" ] && [ ! -e "$1/tcpdump.stop" ] && kill -0 $p 2>/dev/null; do sleep 1; i=$((i+1)); done
 kill -INT $p 2>/dev/null
@@ -101,6 +107,9 @@ wait $p
 /// Launches tcpdump through the supervisor with `sudo -n`, in its own session detached from the foreground.
 fn spawn_tcpdump(bundle: &Path, device: &str, secs: u64) -> anyhow::Result<Child> {
     let user = std::env::var("USER").unwrap_or_else(|_| "nobody".into());
+    // create_new (O_EXCL) refuses an existing path, including a planted symlink
+    let pid_file = OpenOptions::new().write(true).create_new(true).open(bundle.join("tcpdump.pid"))?;
+    let log_file = OpenOptions::new().write(true).create_new(true).open(bundle.join("tcpdump.log"))?;
     let mut cmd = Command::new("sudo");
     cmd.args(["-n", "/bin/sh", "-c", TCPDUMP_SUPERVISOR, "wfx-tcpdump"])
         .arg(bundle)
@@ -109,8 +118,8 @@ fn spawn_tcpdump(bundle: &Path, device: &str, secs: u64) -> anyhow::Result<Child
         .arg(user)
         .arg("(port 67 or port 68) or arp or icmp")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(pid_file)
+        .stderr(log_file);
     // SAFETY: only calls setsid between fork and exec (async-signal-safe).
     unsafe {
         cmd.pre_exec(|| {
@@ -200,8 +209,9 @@ fn run_inner(args: CaptureArgs) -> anyhow::Result<i32> {
     let run_id = new_run_id();
     let name = bundle_name(&current_date("+%Y%m%d-%H%M%S"), &args.ssid, &run_id);
     let bundle: PathBuf = bundles_dir().join(name);
-    std::fs::create_dir_all(bundles_dir())?;
-    std::fs::create_dir(&bundle).map_err(|e| anyhow::anyhow!("cannot create bundle ({}): {e}", bundle.display()))?;
+    // 0700: bundles hold SSIDs, BSSIDs, MACs and pcaps, and the default umask would let other local users read them
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(bundles_dir())?;
+    std::fs::DirBuilder::new().mode(0o700).create(&bundle).map_err(|e| anyhow::anyhow!("cannot create bundle ({}): {e}", bundle.display()))?;
     std::fs::create_dir(bundle.join("commands"))?;
     write_json_atomic(
         &bundle.join("preflight.json"),
@@ -396,9 +406,16 @@ mod tests {
     fn supervisor_script_stops_on_file_or_timeout_and_uses_positional_args() {
         assert!(TCPDUMP_SUPERVISOR.contains("tcpdump.stop"));
         assert!(TCPDUMP_SUPERVISOR.contains("kill -INT"));
-        assert!(TCPDUMP_SUPERVISOR.contains("tcpdump.pid"));
         // The path comes in as $1 (does not break on paths with spaces)
         assert!(TCPDUMP_SUPERVISOR.contains("\"$1/dhcp.pcap\""));
+    }
+
+    #[test]
+    fn supervisor_script_never_redirects_into_the_bundle_as_root() {
+        assert!(!TCPDUMP_SUPERVISOR.contains(">\"$1"));
+        assert!(!TCPDUMP_SUPERVISOR.contains("> \"$1"));
+        assert!(!TCPDUMP_SUPERVISOR.contains("tcpdump.pid"));
+        assert!(!TCPDUMP_SUPERVISOR.contains("tcpdump.log"));
     }
 
     #[test]
