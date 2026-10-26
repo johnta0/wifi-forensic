@@ -3,6 +3,7 @@ name = "wfx"
 version = "0.1.0"
 edition = "2021"
 description = "A Wi-Fi forensic CLI that works fully offline"
+license = "MIT"
 
 [dependencies]
 anyhow = "1"

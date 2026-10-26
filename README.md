@@ -74,3 +74,7 @@ Normally, just enter the password at the `sudo -v` prompt on startup (or use `--
 | DNS check | Uses macOS name resolution (getaddrinfo), so the route cannot be bound to Wi-Fi. Times out after 6 seconds |
 | Real-device testing of `capture` | Not covered by automated tests because it switches Wi-Fi and needs sudo (the restore logic is unit-tested with fakes) |
 | Linux / Windows | Not supported (macOS only) |
+
+## License
+
+[MIT](LICENSE)
