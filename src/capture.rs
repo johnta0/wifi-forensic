@@ -9,6 +9,7 @@ use crate::collect;
 use crate::model::HelperReport;
 use std::fmt::Write;
 use std::fs::OpenOptions;
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -208,8 +209,9 @@ fn run_inner(args: CaptureArgs) -> anyhow::Result<i32> {
     let run_id = new_run_id();
     let name = bundle_name(&current_date("+%Y%m%d-%H%M%S"), &args.ssid, &run_id);
     let bundle: PathBuf = bundles_dir().join(name);
-    std::fs::create_dir_all(bundles_dir())?;
-    std::fs::create_dir(&bundle).map_err(|e| anyhow::anyhow!("cannot create bundle ({}): {e}", bundle.display()))?;
+    // 0700: bundles hold SSIDs, BSSIDs, MACs and pcaps, and the default umask would let other local users read them
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(bundles_dir())?;
+    std::fs::DirBuilder::new().mode(0o700).create(&bundle).map_err(|e| anyhow::anyhow!("cannot create bundle ({}): {e}", bundle.display()))?;
     std::fs::create_dir(bundle.join("commands"))?;
     write_json_atomic(
         &bundle.join("preflight.json"),
