@@ -8,7 +8,11 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$DIR/Info.plist" "$APP/Contents/Info.plist"
 
-swiftc -O -o "$APP/Contents/MacOS/WfxHelper" "$DIR/Sources/main.swift" \
+# Pin the target to LSMinimumSystemVersion: swiftc's default follows the host
+# and can name an OS newer than the running one, which LaunchServices refuses
+# to launch (-10825, kLSIncompatibleSystemVersionErr).
+MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$DIR/Info.plist")"
+swiftc -O -target "$(uname -m)-apple-macos$MIN_OS" -o "$APP/Contents/MacOS/WfxHelper" "$DIR/Sources/main.swift" \
   -framework AppKit -framework CoreLocation -framework CoreWLAN
 
 # Note: ad-hoc signing ("-") changes the code identity on every build, so the
